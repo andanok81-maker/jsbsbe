@@ -18,6 +18,35 @@ local GET_KEY_URL = "https://andzvclra.andanok81.workers.dev/vuotlink"
 local SAVED_KEY_FILE = "andz_license_key.txt"
 local LOGO_ASSET = "rbxassetid://18856351865"
 
+-- Thông tin license nhận từ API xác thực
+local CurrentLicenseKey = "Chưa có dữ liệu"
+local CurrentLicenseExpiry = "API không trả về thời hạn"
+local CurrentLicenseRemainingMs = nil
+local CurrentLicenseRemainingAt = nil
+
+local function FormatLicenseExpiry(value)
+  if value == nil or value == "" then return "API không trả về thời hạn" end
+
+  local timestamp = tonumber(value)
+  if timestamp then
+    if timestamp > 100000000000 then timestamp = math.floor(timestamp / 1000) end
+    local ok, formatted = pcall(os.date, "!%d/%m/%Y %H:%M:%S", timestamp + 7 * 60 * 60)
+    return ok and (formatted .. " (GMT+7)") or tostring(value)
+  end
+
+  local iso = tostring(value)
+  local ok, formatted = pcall(function()
+    local y, mo, d, h, mi, se = iso:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
+    if not y then return nil end
+    local utc = DateTime.fromUniversalTime(
+      tonumber(y), tonumber(mo), tonumber(d),
+      tonumber(h), tonumber(mi), tonumber(se)
+    ).UnixTimestamp
+    return os.date("!%d/%m/%Y %H:%M:%S", utc + 7 * 60 * 60) .. " (GMT+7)"
+  end)
+  return ok and formatted or iso
+end
+
 local function RunMenuScript()
 --[[
   Game: Roblox-MemeSea
@@ -3380,8 +3409,167 @@ local _Shop = Tabs.Shop do
   end
 end
 
+-- Misc movement helpers
+local MiscMove = {
+  SpeedEnabled = false,
+  JumpEnabled = false,
+  WaterEnabled = false,
+  WalkSpeed = 32,
+  JumpPower = 80,
+  WaterPart = nil,
+  WaterY = nil,
+  WaterConnection = nil,
+  SavedHumanoid = nil,
+  OriginalWalkSpeed = nil,
+  OriginalJumpPower = nil,
+  OriginalJumpHeight = nil
+}
+
+local function GetLocalHumanoid()
+  local character = Player.Character
+  if not character then return nil, nil end
+  return character, character:FindFirstChildOfClass("Humanoid")
+end
+
+local function ApplyMovementSettings()
+  local _, humanoid = GetLocalHumanoid()
+  if not humanoid then return end
+
+  if MiscMove.SavedHumanoid ~= humanoid then
+    MiscMove.SavedHumanoid = humanoid
+    MiscMove.OriginalWalkSpeed = humanoid.WalkSpeed
+    MiscMove.OriginalJumpPower = humanoid.JumpPower
+    MiscMove.OriginalJumpHeight = humanoid.JumpHeight
+  end
+
+  humanoid.WalkSpeed = MiscMove.SpeedEnabled and MiscMove.WalkSpeed
+    or MiscMove.OriginalWalkSpeed
+
+  if humanoid.UseJumpPower then
+    humanoid.JumpPower = MiscMove.JumpEnabled and MiscMove.JumpPower
+      or MiscMove.OriginalJumpPower
+  else
+    humanoid.JumpHeight = MiscMove.JumpEnabled and math.max(7.2, MiscMove.JumpPower / 7)
+      or MiscMove.OriginalJumpHeight
+  end
+end
+
+local function RemoveWaterWalk()
+  if MiscMove.WaterConnection then
+    MiscMove.WaterConnection:Disconnect()
+    MiscMove.WaterConnection = nil
+  end
+  if MiscMove.WaterPart then
+    MiscMove.WaterPart:Destroy()
+    MiscMove.WaterPart = nil
+  end
+  MiscMove.WaterY = nil
+end
+
+local function StartWaterWalk()
+  RemoveWaterWalk()
+  local character, humanoid = GetLocalHumanoid()
+  local root = character and character:FindFirstChild("HumanoidRootPart")
+  if not root or not humanoid then return end
+
+  local platform = Instance.new("Part")
+  platform.Name = "ANDZ_WaterWalk_Local"
+  platform.Size = Vector3.new(14, 1, 14)
+  platform.Anchored = true
+  platform.CanCollide = true
+  platform.CanTouch = false
+  platform.CanQuery = false
+  platform.Transparency = 0.35
+  platform.Material = Enum.Material.ForceField
+  platform.Color = Color3.fromRGB(70, 190, 255)
+  platform.Parent = workspace
+
+  MiscMove.WaterPart = platform
+  MiscMove.WaterY = root.Position.Y - (humanoid.HipHeight + root.Size.Y / 2 + 0.5)
+  platform.Position = Vector3.new(root.Position.X, MiscMove.WaterY, root.Position.Z)
+
+  MiscMove.WaterConnection = RunService.Heartbeat:Connect(function()
+    if not MiscMove.WaterEnabled then
+      RemoveWaterWalk()
+      return
+    end
+
+    local currentCharacter = Player.Character
+    local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart")
+    local currentHumanoid = currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid")
+    if not currentRoot or not currentHumanoid or not platform.Parent then
+      return
+    end
+
+    platform.Position = Vector3.new(
+      currentRoot.Position.X,
+      MiscMove.WaterY,
+      currentRoot.Position.Z
+    )
+  end)
+end
+
+Player.CharacterAdded:Connect(function()
+  task.wait(0.75)
+  MiscMove.SavedHumanoid = nil
+  ApplyMovementSettings()
+  if MiscMove.WaterEnabled then
+    StartWaterWalk()
+  end
+end)
+
 local _Misc = Tabs.Misc do
   _Misc:AddButton({"Tự Động Nhập Tất Cả Code", Funcs.RAllCodes})
+  _Misc:AddSection("Thông Tin KEY")
+  local KeyInfoParagraph = _Misc:AddParagraph({"KEY CỦA BẠN", CurrentLicenseKey})
+  local ExpiryInfoParagraph = _Misc:AddParagraph({"NGÀY HẾT HẠN", CurrentLicenseExpiry})
+  local RemainingInfoParagraph = _Misc:AddParagraph({"THỜI GIAN CÒN LẠI", "Đang chờ dữ liệu API..."})
+
+  task.spawn(function()
+    while task.wait(1) do
+      KeyInfoParagraph:SetDesc(CurrentLicenseKey or "Chưa có dữ liệu")
+      ExpiryInfoParagraph:SetDesc(CurrentLicenseExpiry or "API không trả về thời hạn")
+
+      if CurrentLicenseRemainingMs and CurrentLicenseRemainingAt then
+        local elapsed = math.max(0, (os.clock() - CurrentLicenseRemainingAt) * 1000)
+        local left = math.max(0, CurrentLicenseRemainingMs - elapsed)
+        local totalSeconds = math.floor(left / 1000)
+        local days = math.floor(totalSeconds / 86400)
+        local hours = math.floor((totalSeconds % 86400) / 3600)
+        local minutes = math.floor((totalSeconds % 3600) / 60)
+        local seconds = totalSeconds % 60
+        RemainingInfoParagraph:SetDesc(string.format("%dd %02dh %02dm %02ds", days, hours, minutes, seconds))
+      else
+        RemainingInfoParagraph:SetDesc("API không trả về thời gian còn lại")
+      end
+    end
+  end)
+  _Misc:AddSection("Di Chuyển")
+  _Misc:AddToggle({"Chạy Nhanh", false, function(Value)
+    MiscMove.SpeedEnabled = Value
+    ApplyMovementSettings()
+  end, "ANDZ Fast Run"})
+  _Misc:AddSlider({"Tốc Độ Chạy", 16, 100, MiscMove.WalkSpeed, 1, function(Value)
+    MiscMove.WalkSpeed = Value or 32
+    if MiscMove.SpeedEnabled then ApplyMovementSettings() end
+  end, "ANDZ WalkSpeed"})
+  _Misc:AddToggle({"Nhảy Cao", false, function(Value)
+    MiscMove.JumpEnabled = Value
+    ApplyMovementSettings()
+  end, "ANDZ High Jump"})
+  _Misc:AddSlider({"Độ Cao Nhảy", 50, 150, MiscMove.JumpPower, 1, function(Value)
+    MiscMove.JumpPower = Value or 80
+    if MiscMove.JumpEnabled then ApplyMovementSettings() end
+  end, "ANDZ JumpPower"})
+  _Misc:AddToggle({"Đi Trên Nước", false, function(Value)
+    MiscMove.WaterEnabled = Value
+    if Value then
+      StartWaterWalk()
+    else
+      RemoveWaterWalk()
+    end
+  end, "ANDZ Water Walk"})
+
   _Misc:AddSection("Cài Đặt")
   _Misc:AddSlider({"Khoảng Cách Farm", 5, 15, 1, 8, function(Value)
     Settings.FarmDistance = Value or 8
@@ -3506,6 +3694,25 @@ local function ParseKeyResponse(body)
       or statusStr == "active"
 
     if valid then
+      local expiry = decoded.expires_at or decoded.expiry or decoded.expired_at
+        or decoded.expiresAt or decoded.expire_at or decoded.expiration
+      if decoded.key ~= nil and tostring(decoded.key) ~= "" then
+        CurrentLicenseKey = tostring(decoded.key)
+      end
+      CurrentLicenseExpiry = FormatLicenseExpiry(expiry)
+
+      local remaining = tonumber(decoded.remainingMs)
+      if not remaining and tonumber(decoded.remainingSeconds) then
+        remaining = tonumber(decoded.remainingSeconds) * 1000
+      end
+      if remaining then
+        CurrentLicenseRemainingMs = math.max(0, remaining)
+        CurrentLicenseRemainingAt = os.clock()
+      else
+        CurrentLicenseRemainingMs = nil
+        CurrentLicenseRemainingAt = nil
+      end
+
       return true, msgStr ~= "" and msgStr or "Key hợp lệ! Đang mở menu..."
     end
     return false, msgStr ~= "" and msgStr or "Key không hợp lệ hoặc đã hết hạn."
@@ -3951,6 +4158,9 @@ local function PromptKeyWindow()
 
     local ok, msg = VerifyKeyWithAPI(keyInput.Text)
     if ok then
+      if not CurrentLicenseKey or CurrentLicenseKey == "" or CurrentLicenseKey == "Chưa có dữ liệu" then
+        CurrentLicenseKey = tostring(keyInput.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+      end
       statusDot.BackgroundColor3 = Color3.fromRGB(52, 211, 153)
       infoLbl.TextColor3 = Color3.fromRGB(52, 211, 153)
       infoLbl.Text = msg
